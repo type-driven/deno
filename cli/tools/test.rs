@@ -250,6 +250,7 @@ struct TestSpecifierOptions {
   concurrent_jobs: NonZeroUsize,
   fail_fast: Option<NonZeroUsize>,
   filter: TestFilter,
+  doc: bool,
 }
 
 impl TestSummary {
@@ -810,11 +811,46 @@ fn extract_files_from_regex_blocks(
       ))
       .unwrap();
 
+      let mut test_source = String::new();
+
+      // imports go to the top
+      file_source
+        .clone()
+        .lines()
+        .filter(|l| l.contains("import"))
+        .for_each(|c| {
+          writeln!(test_source, "{}", c).unwrap();
+        });
+
+      // wrap actual test in Deno.test
+      writeln!(test_source, "Deno.test(\"{}\", ", file_specifier)
+        .unwrap();
+
+      let is_async = file_source.clone().contains("await");
+      if is_async {
+        writeln!(test_source, "async () => {{").unwrap();
+      } else {
+        writeln!(test_source, "() => {{").unwrap();
+      }
+
+      file_source
+        .clone()
+        .lines()
+        .filter(|l| !l.contains("import"))
+        .for_each(|c| {
+          writeln!(test_source, "{}", c).unwrap();
+        });
+
+      writeln!(test_source, "}});").unwrap();
+
+      // debug
+      println!("{}:{}", file_specifier, test_source.clone());
+
       Some(File {
         local: file_specifier.to_file_path().unwrap(),
         maybe_types: None,
         media_type: file_media_type,
-        source: file_source.into(),
+        source: test_source.into(),
         specifier: file_specifier,
         maybe_headers: None,
       })
@@ -991,6 +1027,35 @@ async fn test_specifiers(
   options: TestSpecifierOptions,
 ) -> Result<(), AnyError> {
   let log_level = ps.options.log_level();
+
+  let specifiers_with_mode = if options.doc {
+    let mut specifiers_with_mode = specifiers_with_mode;
+    let inline_files = fetch_inline_files(
+      ps,
+      specifiers_with_mode
+        .clone()
+        .iter()
+        .filter_map(|(specifier, mode)| {
+          if *mode != TestMode::Executable {
+            Some(specifier.clone())
+          } else {
+            None
+          }
+        })
+        .collect(),
+    )
+    .await?;
+    specifiers_with_mode.extend(
+      inline_files
+        .into_iter()
+        .map(|file| (file.specifier, TestMode::Executable)),
+    );
+    specifiers_with_mode.sort_by_key(|(specifier, _)| specifier.clone());
+    specifiers_with_mode
+  } else {
+    specifiers_with_mode
+  };
+
   let specifiers_with_mode = if let Some(seed) = ps.options.shuffle_tests() {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut specifiers_with_mode = specifiers_with_mode;
@@ -1333,6 +1398,7 @@ pub async fn run_tests(
       concurrent_jobs: test_options.concurrent_jobs,
       fail_fast: test_options.fail_fast,
       filter: TestFilter::from_flag(&test_options.filter),
+      doc: test_options.doc,
     },
   )
   .await?;
@@ -1496,6 +1562,7 @@ pub async fn run_tests_with_watch(
           concurrent_jobs: test_options.concurrent_jobs,
           fail_fast: test_options.fail_fast,
           filter: TestFilter::from_flag(&test_options.filter),
+          doc: test_options.doc,
         },
       )
       .await?;
